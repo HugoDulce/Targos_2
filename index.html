@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Email Verifier</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin-top: 40px; }
+    #drop-zone {
+      border: 2px dashed #ccc;
+      padding: 40px;
+      width: 400px;
+      margin: auto;
+      background: #f9f9f9;
+      cursor: pointer;
+    }
+    #drop-zone.hover { border-color: #000; }
+    .job-block {
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 20px auto;
+      width: 400px;
+      background: #fafafa;
+      text-align: left;
+      position: relative;
+    }
+    .progress-bar {
+      height: 18px;
+      background: #4caf50;
+      width: 0%;
+      transition: width 0.2s;
+      border-radius: 10px;
+    }
+    .progress-container {
+      background: #eee;
+      border-radius: 10px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .status, .log-line, .actions {
+      font-size: 13px;
+      margin-top: 5px;
+    }
+    .actions a {
+      color: #007aff;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .close-job {
+      position: absolute;
+      top: 10px;
+      right: 15px;
+      font-size: 14px;
+      color: #999;
+      cursor: pointer;
+    }
+    footer {
+      margin-top: 40px;
+      font-size: 13px;
+    }
+    footer a {
+      color: #000;
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>Upload Emails to Verify</h1>
+  <div id="drop-zone">Drop CSV here or click to upload</div>
+  <input type="file" id="file-input" accept=".csv" style="display:none;">
+  <div id="jobs"></div>
+
+  <footer>
+    This tool helps you find qualified leads. Now let's get you more sales with
+    <a href="https://www.alxberman.com/mastermind?utm_source=tools&utm_campaign=desktopverifier&utm_medium=footer" target="_blank">AB Mastermind</a>
+  </footer>
+
+  <script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const jobsContainer = document.getElementById('jobs');
+
+    let jobList = JSON.parse(localStorage.getItem('verifier-jobs') || '[]');
+    jobList.forEach(({ job_id, fileName }) => createJobBlock(job_id, fileName));
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('hover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('hover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('hover');
+      handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
+
+    function handleFile(file) {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      fetch('http://localhost:5050/verify', {
+        method: 'POST',
+        body: formData
+      })
+      .then(res => res.json())
+      .then(({ job_id }) => {
+        jobList.push({ job_id, fileName: file.name });
+        localStorage.setItem('verifier-jobs', JSON.stringify(jobList));
+        createJobBlock(job_id, file.name);
+      });
+    }
+
+    function createJobBlock(job_id, fileName) {
+      const block = document.createElement('div');
+      block.className = 'job-block';
+      block.innerHTML = `
+        <div class="close-job">✖</div>
+        <div><strong>${fileName}</strong></div>
+        <div class="progress-container"><div class="progress-bar"></div></div>
+        <div class="status">Starting...</div>
+        <div class="log-line"></div>
+        <div class="actions"><a class="cancel">Cancel</a></div>
+      `;
+      jobsContainer.prepend(block);
+
+      const bar = block.querySelector('.progress-bar');
+      const status = block.querySelector('.status');
+      const logLine = block.querySelector('.log-line');
+      const cancelBtn = block.querySelector('.cancel');
+      const actions = block.querySelector('.actions');
+      const closeBtn = block.querySelector('.close-job');
+
+      let canceled = false;
+      const removeJob = () => {
+        block.remove();
+        jobList = jobList.filter(j => j.job_id !== job_id);
+        localStorage.setItem('verifier-jobs', JSON.stringify(jobList));
+      };
+
+      cancelBtn.onclick = () => {
+        canceled = true;
+        fetch(`http://localhost:5050/cancel?job_id=${job_id}`, { method: 'POST' });
+        status.innerText = `❌ Canceled job ${job_id}`;
+        actions.innerHTML = '';
+      };
+
+      closeBtn.onclick = () => {
+        fetch(`http://localhost:5050/cancel?job_id=${job_id}`, { method: 'POST' });
+        removeJob();
+      };
+
+      const poll = setInterval(() => {
+        if (canceled) return clearInterval(poll);
+
+        fetch(`http://localhost:5050/progress?job_id=${job_id}`)
+          .then(res => res.json())
+          .then(data => {
+            bar.style.width = `${data.percent}%`;
+            status.innerText = `${data.percent}% done – Row ${data.row} of ${data.total}`;
+          });
+
+        fetch(`http://localhost:5050/log?job_id=${job_id}`)
+          .then(res => res.text())
+          .then(text => {
+            logLine.innerText = text.replace(/^\[\d+%\] \(\d+\/\d+\) /, '');
+          });
+      }, 1000);
+
+      const wait = setInterval(() => {
+        if (canceled) return clearInterval(wait);
+        fetch(`http://localhost:5050/progress?job_id=${job_id}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.percent >= 100) {
+              clearInterval(wait);
+              actions.innerHTML = `
+                <div style="margin-top: 10px;">
+                  <strong>⬇️ Download CSV:</strong><br>
+                 <div>
+      <a href="http://localhost:5050/download?job_id=${job_id}&type=all" target="_blank">All Leads</a> |
+      <a href="http://localhost:5050/download?job_id=${job_id}&type=valid" target="_blank">Valid Only</a>
+    </div>
+    <div>
+      <a href="http://localhost:5050/download?job_id=${job_id}&type=risky" target="_blank">Risky Only</a> |
+      <a href="http://localhost:5050/download?job_id=${job_id}&type=risky_invalid" target="_blank">Risky & Invalid</a>
+    </div>
+                  </div>
+              `;
+            }
+          });
+      }, 1500);
+    }
+  </script>
+</body>
+</html>
