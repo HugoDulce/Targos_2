@@ -59,64 +59,76 @@ def base_check_py3(email: str):
     return True, "py3_ok"
 
 def check_email(email):
-    import time
+    """
+    Improved verifier using:
+    1) regex (keep your existing quick filter)
+    2) disposable / role-based (your rules)
+    3) MX check (fast fail)
+    4) MailScout catch-all + SMTP deliverability
+    """
 
+    # -------------------------------
+    # 1. Syntax check (keep your regex)
+    # -------------------------------
     if not EMAIL_REGEX.match(email):
         return "invalid", "bad_syntax"
 
-    domain = email.split('@')[1]
-    local = email.split('@')[0]
+    local, domain = email.split("@", 1)
 
+    # -------------------------------
+    # 2. Disposable + role-based
+    # -------------------------------
     if domain.lower() in DISPOSABLE_DOMAINS:
         return "invalid", "disposable_domain"
-    if local.lower() in ROLE_BASED_PREFIXES:
-        return "invalid", "role_based"
 
+    if local.lower() in ROLE_BASED_PREFIXES:
+        return "risky", "role_based"
+
+    # -------------------------------
+    # 3. MX record lookup
+    # -------------------------------
     try:
-        records = dns.resolver.resolve(domain, 'MX')
-        mx_record = str(records[0].exchange)
+        mx_records = dns.resolver.resolve(domain, 'MX')
     except Exception:
         return "invalid", "no_mx"
 
+    # -------------------------------
+    # 4. Catch-all detection (MailScout)
+    # -------------------------------
     try:
-        server = smtplib.SMTP(timeout=10)
-        server.connect(mx_record)
-        server.helo("example.com")
-        server.mail("probe@example.com")
-        code, _ = server.rcpt(f"doesnotexist123@{domain}")
-        server.quit()
-        if code == 250:
-            return "risky", "domain_accepts_all"
+        is_catchall = scout.check_email_catchall(domain)
     except Exception:
-        pass
+        # If catch-all detection fails, keep going
+        is_catchall = None
 
-    def smtp_check():
-        try:
-            server = smtplib.SMTP(timeout=10)
-            server.connect(mx_record)
-            server.helo("example.com")
-            server.mail("verifier@example.com")
-            code, _ = server.rcpt(email)
-            server.quit()
-            return code
-        except Exception:
-            return None
+    # -------------------------------
+    # 5. SMTP deliverability check (MailScout)
+    # -------------------------------
+    try:
+        is_deliverable = scout.check_smtp(email)
+    except Exception:
+        # If the SMTP attempt does not run (timeout, network block),
+        # we classify as risky but not invalid.
+        return "risky", "smtp_error"
 
-    code = smtp_check()
-    if code in [421, 450, 451, 452, 503]:
-        time.sleep(5)
-        code = smtp_check()
+    # -------------------------------
+    # 6. Interpret MailScout results
+    # -------------------------------
+    # Case A: SMTP says deliverable
+    if is_deliverable:
+        if is_catchall:
+            # Domain is catch-all → mailbox may not exist
+            return "risky", "domain_accepts_all"
+        else:
+            return "valid", "smtp_ok"
 
-    if code == 250:
-        return "valid", "smtp_ok"
-    elif code is None:
-        return "risky", "smtp_timeout"
-    elif code in [421, 450, 451, 452, 503]:
-        return "risky", f"smtp_soft_fail_{code}"
-    elif code == 550:
-        return "invalid", "smtp_reject"
-    else:
-        return "invalid", f"smtp_{code}"
+    # Case B: SMTP says NOT deliverable
+    # If domain is catch-all, we cannot trust SMTP
+    if is_catchall:
+        return "risky", "catchall_uncertain"
+
+    # If not catch-all and SMTP says false → consider invalid
+    return "invalid", "smtp_not_deliverable"
 
 @app.route('/verify', methods=['POST'])
 def verify():
