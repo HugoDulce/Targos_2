@@ -10,6 +10,9 @@ import smtplib
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 from tempfile import NamedTemporaryFile
+from validate_email import validate_email
+from mailscout import Scout
+
 
 app = Flask(__name__)
 CORS(app)
@@ -21,6 +24,39 @@ DISPOSABLE_DOMAINS = {"mailinator.com", "10minutemail.com", "guerrillamail.com"}
 ROLE_BASED_PREFIXES = {"info", "support", "admin", "sales", "contact"}
 
 data = {}
+# Global MailScout instance and catch-all cache
+scout = Scout(
+    check_catchall=True,
+    num_threads=5,
+    smtp_timeout=5,
+)
+
+CATCHALL_CACHE = {}
+
+
+def base_check_py3(email: str):
+    """
+    Fast structural + disposable/domain check using py3-validate-email.
+    Return (ok: bool, reason: str)
+    """
+    try:
+        ok = validate_email(
+            email_address=email,
+            check_regex=True,    # RFC-ish syntax
+            check_mx=False,      # leave MX + SMTP to MailScout
+            use_blacklist=True,  # disposable / bad domains
+            smtp_timeout=5,
+            dns_timeout=5,
+        )
+    except Exception:
+        # Any error in the library itself: treat as inconclusive
+        return False, "py3_error"
+
+    if not ok:
+        # Could be format issue or blacklisted domain.
+        return False, "py3_format_or_blacklist"
+
+    return True, "py3_ok"
 
 def check_email(email):
     import time
