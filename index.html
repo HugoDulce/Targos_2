@@ -83,7 +83,22 @@
       const fileInput = document.getElementById("file-input");
       const jobsContainer = document.getElementById("jobs");
 
-      let jobList = JSON.parse(localStorage.getItem("verifier-jobs") || "[]");
+      const STORAGE_KEY = "verifier-jobs";
+      const JOB_TTL_MS = 30 * 60 * 1000;
+
+      function persistJobs() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(jobList));
+      }
+
+      let jobList = JSON.parse(
+        localStorage.getItem(STORAGE_KEY) || "[]"
+      )
+        .map((job) => ({
+          ...job,
+          startedAt: job.startedAt || Date.now(),
+        }))
+        .filter((job) => Date.now() - job.startedAt < JOB_TTL_MS);
+      persistJobs();
       jobList.forEach(({ job_id, fileName }) =>
         createJobBlock(job_id, fileName)
       );
@@ -115,8 +130,12 @@
         })
           .then((res) => res.json())
           .then(({ job_id }) => {
-            jobList.push({ job_id, fileName: file.name });
-            localStorage.setItem("verifier-jobs", JSON.stringify(jobList));
+            jobList.push({
+              job_id,
+              fileName: file.name,
+              startedAt: Date.now(),
+            });
+            persistJobs();
             createJobBlock(job_id, file.name);
           });
       }
@@ -145,7 +164,7 @@
         const removeJob = () => {
           block.remove();
           jobList = jobList.filter((j) => j.job_id !== job_id);
-          localStorage.setItem("verifier-jobs", JSON.stringify(jobList));
+          persistJobs();
         };
 
         cancelBtn.onclick = () => {
@@ -201,6 +220,40 @@
     </div>
                   </div>
               `;
+                const metricsPanel = document.createElement("div");
+                metricsPanel.className = "metrics";
+                metricsPanel.style.marginTop = "10px";
+                metricsPanel.innerText = "Fetching metrics…";
+                actions.appendChild(metricsPanel);
+
+                fetch(`http://localhost:5050/metrics?job_id=${job_id}`)
+                  .then((res) => res.json())
+                  .then((payload) => {
+                    if (payload.metrics) {
+                      const m = payload.metrics;
+                      const counts = payload.counts;
+                      metricsPanel.innerHTML = `
+                        <strong>Metrics</strong><br>
+                        Accuracy: ${m.accuracy.toFixed(2)}% |
+                        Precision: ${m.precision.toFixed(2)}% |
+                        Recall: ${m.recall.toFixed(2)}% |
+                        F1: ${m.f1_score.toFixed(2)}%<br>
+                        TP: ${counts.true_positive} · TN: ${
+                        counts.true_negative
+                      } ·
+                        FP: ${counts.false_positive} · FN: ${
+                        counts.false_negative
+                      }
+                      `;
+                    } else if (payload.error) {
+                      metricsPanel.innerText = `Metrics error: ${payload.error}`;
+                    } else {
+                      metricsPanel.innerText = "Metrics still processing...";
+                    }
+                  })
+                  .catch((err) => {
+                    metricsPanel.innerText = `Metrics error: ${err}`;
+                  });
               }
             });
         }, 1500);
